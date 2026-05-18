@@ -1,0 +1,53 @@
+Metadata-Version: 2.4
+Name: visualsd
+Version: 0.1.0
+Summary: Visualización y procesamiento de datos sísmicos e infrasónico
+Author-email: Ivan Melchor <ifmelchor@unrn.edu.ar>
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: multitaper
+Requires-Dist: sqlalchemy
+Requires-Dist: utm
+Requires-Dist: pyqtgraph>=0.13.0
+Requires-Dist: obspy>=1.4.0
+Requires-Dist: PyQt5>=5.15
+
+
+# VisualSD
+
+**Visualización y procesamiento de datos sísmicos e infrasónicos**
+
+VisualSD es una biblioteca de Python para el análisis de arrays sísmicos/infrasónicos, beamforming, y visualización interactiva de trazas. Proporciona herramientas para el cálculo de delays, alineación de señales, y representación gráfica mediante PyQtGraph.
+
+## 🚀 Características
+
+- **Beamforming**: Cálculo de Linear Stack y Product Beam
+- **Alineación de señales**: Matriz de delays antisimétrica basada en coordenadas de estaciones
+- **Visualización interactiva**: Widgets de PyQtGraph con sincronización de ejes
+- **Procesamiento eficiente**: Operaciones vectorizadas con NumPy/SciPy
+- **Compatibilidad ObsPy**: Integración nativa con objetos `Trace` y `Stream`
+
+## 📦 Instalación
+
+### Requisitos
+- Python >= 3.11
+- pip >= 23.0
+
+### Instalación desde código fuente (modo desarrollo)
+
+```bash
+# Clonar o navegar al directorio del proyecto
+cd VisualSD
+
+# Crear entorno virtual (recomendado)
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Instalar en modo editable
+pip install -e .
+
+# O con dependencias de GUI (por defecto incluidas)
+pip install -e .[gui]

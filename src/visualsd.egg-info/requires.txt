@@ -1,0 +1,8 @@
+numpy
+scipy
+multitaper
+sqlalchemy
+utm
+pyqtgraph>=0.13.0
+obspy>=1.4.0
+PyQt5>=5.15

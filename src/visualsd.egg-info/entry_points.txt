@@ -1,0 +1,2 @@
+[console_scripts]
+zlccviewer = visualsd.cli:zlcc_viewer

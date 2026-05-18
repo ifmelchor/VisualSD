@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visualsd"
+version = "0.1.0"
+description = "Visualización y procesamiento de datos sísmicos e infrasónico"
+authors = [
+    {name = "Ivan Melchor", email = "ifmelchor@unrn.edu.ar"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "numpy",
+    "scipy",
+    "multitaper",
+    "sqlalchemy",
+    "utm",
+    "pyqtgraph>=0.13.0",
+    "obspy>=1.4.0",
+    "PyQt5>=5.15"  # o PySide6 si prefieres
+]
+
+[tool.setuptools.packages.find]
+where = ["src"] 
+include = ["visualsd*"]
+
+[project.scripts]
+zlccviewer = "visualsd.cli:zlcc_viewer"
