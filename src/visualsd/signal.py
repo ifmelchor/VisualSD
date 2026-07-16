@@ -133,7 +133,7 @@ def psd(data, fs, winl=50, olap=0.75, window="hann", scaling='density'):
     return f, pxx
 
 
-def psd_multitaper(data, fs, nw=4.0, kspec=None):
+def multitaper(data, fs, nw=4.0, kspec=None):
 
     dt = 1.0 / fs
     

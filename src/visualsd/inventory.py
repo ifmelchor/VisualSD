@@ -210,10 +210,47 @@ class Network:
         lon = np.array(lon_list)
 
         if plot:
-            plot_utm(code, lat, lon, **plot_kwargs)
+            return plot_utm(code, lat, lon, **plot_kwargs)
         else:
             return code, lat, lon
 
+
+    def get_aperture(self):
+
+        labels, x_coords, y_coords = self.get_position(utm=True, plot=False)
+
+        num_sensores = len(x_coords)
+        if num_sensores < 2:
+            print(" >> num_sensores < 2!")
+            return
+
+        max_dist = 0.0
+        sensor_a_max, sensor_b_max = None, None
+        sensor_a, sensor_b = "", ""
+
+        print("\n--- Distancias entre pares de sensores ---")
+
+        x_coords /= 1000
+        y_coords /= 1000
+
+        for i in range(num_sensores):
+            for j in range(i + 1, num_sensores):
+                dx = x_coords[i] - x_coords[j]
+                dy = y_coords[i] - y_coords[j]
+                dist = np.sqrt(dx**2 + dy**2)
+                sla = labels[i]
+                slb = labels[j]
+
+                print(f" {sla} -- {slb}: {dist:.2f} m")
+
+                if dist > max_dist:
+                    max_dist = dist
+                    sensor_a = sla
+                    sensor_b = slb
+                    sensor_a_max = i
+                    sensor_b_max = j
+
+        return (sensor_a, sensor_b), max_dist
 
     def get_stream(self, starttime, endtime, toff, stations=None, component="Z", return_array=False, **kwargs):
 
@@ -363,7 +400,7 @@ class Station:
         # prepara el archivo de configuracion
         config_kwargs = kwargs.copy()
         rm_sens = config_kwargs.get('rm_sens', True)
-        rm_resp =config_kwargs.get('rm_resp', False)
+        rm_resp = config_kwargs.get('rm_resp', False)
 
         if rm_sens or rm_resp:
             sens_dict = {}
@@ -460,6 +497,11 @@ class Array(Network):
     def __repr__(self):
         return f"<Array {self.code} ({len(self._stations)} stations)>"
 
+    def get_stream(self, starttime, endtime, toff, stations=None, component=None, return_array=False, **kwargs):
+        if component is None:
+            component = self.component
+        return super().get_stream(starttime, endtime, toff, stations=stations, component=self.component, return_array=return_array, **kwargs)
+
     def delay_matrix(self, sx, sy):
         """
         Calcula delays usando las coordenadas de este Array.
@@ -487,16 +529,26 @@ class Array(Network):
 
         from .plotting import slowmap
 
-        _, axes = slowmap(power, s_vals, s_vals, v_min=0, v_max=power.max())
-        axes[0].set_title(f"{self.code} • f={fmin}-{fmax} Hz • N={len(self)}")
+        fig, _, axes = slowmap(power, s_vals, s_vals, v_min=0, v_max=power.max())
+        axes[0].set_title(f"freq={fmin}-{fmax} Hz")
 
-        plt.show()
-
-        return
+        return fig, axes
 
     def zlcc(self, starttime, data, fs, lwin, nadv, fmin, fmax, slowmax, tof, **zlcc_kwargs):
 
-        from .array import parse_julia_dict, ZLCCResult
+        from .array import parse_zlcc_output, ZLCCResult
+
+        def set_default(**kwargs):
+            defaults = {
+                "slowint_c" : 0.1,
+                "slowint_f" : 0.01,
+                "ccerr"     : 0.95,
+                "maac_th"   : 0.3,
+                "slowfw"    : 0.5,
+                "return_cmap": True,
+            }
+            defaults.update(kwargs)
+            return defaults
 
         # Cargar la librería en el entorno de Julia
         if not self._jl_loaded:
@@ -505,18 +557,23 @@ class Array(Network):
             self._jl = jl
             self._jl_loaded = True
 
+        # carga las posiciones
         _, posx, posy = self.get_position(utm=True)
-
         x_jl   = self._jl.Array(posx/1000)
         y_jl   = self._jl.Array(posy/1000)
+
+        # carga el objeto SeisArray2D de julia
         sa_jl  = self._jl.SeisArray2D(x_jl, y_jl, self._jl.Array(data), fs)
-        ans_jl = self._jl.zlcc(sa_jl, lwin, nadv, fmin, fmax, slowmax, tof, **zlcc_kwargs)
-        ans_py = parse_julia_dict(ans_jl)
 
-        slowint = zlcc_kwargs.get("slowint_f", 0.01)
-        ccerr   = zlcc_kwargs.get("ccerr", 0.95)
+        # define los kwargs
+        zlcc_kwargs = set_default(**zlcc_kwargs)
+        ans_jl = self._jl.zlcc(sa_jl, lwin, float(nadv), float(fmin), float(fmax), float(slowmax), float(tof), zlcc_kwargs.get("slowint_c"), zlcc_kwargs.get("slowint_f"), zlcc_kwargs.get("ccerr"), zlcc_kwargs.get("maac_th"), zlcc_kwargs.get("slowfw"), zlcc_kwargs.get("return_cmap")
+            )
 
-        zlcc_ob = ZLCCResult(starttime, posx/1000, posy/1000, fs, lwin, slowmax, slowint, tof, ccerr, ans_py)
+        ans_py  = parse_zlcc_output(self._jl, ans_jl)
+        code    = f"{self.code}.{self.component}"
+        
+        zlcc_ob = ZLCCResult(code, starttime, fmin, fmax, posx/1000, posy/1000, fs, lwin, slowmax, zlcc_kwargs.get("slowint_f"), tof, zlcc_kwargs.get("ccerr"), ans_py, data)
 
         return zlcc_ob
 

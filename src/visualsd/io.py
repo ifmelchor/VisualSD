@@ -1,36 +1,38 @@
 #!/usr/bin/python3
 
-from os import path
+import os
 import numpy as np
 import datetime as dt
 
-def save_zlcc(filepath, data, slowmax, slowint, ans):
+def save_zlcc(filepath, ans):
     """
     Guarda los resultados del ZLCC y las trazas originales en un archivo .npz
     """
 
-    out_dir = path.dirname(filepath)
-    if not path.exists(out_dir):
-        os.makedirs(out_dir)
+    out_dir = os.path.dirname(filepath)
+    os.makedirs(out_dir, exist_ok=True)
 
     # metadata
     save_dict = {
+        'code':      ans.id,
         'starttime': str(ans.starttime),
-        'data': data,
-        'slowmax':slowmax,
-        'slowint':slowint,
-        'posx': ans.posx,
-        'posy': ans.posy,
-        'fs': ans.fs,
-        'lwin': ans.lwin,
-        'toff': ans.toff,
-        'ccerr': ans.ccerr,
+        'data':      ans.data,
+        'slowmax':   ans.slowmax,
+        'slowint':   ans.slowint,
+        'fmin':      ans.fmin,
+        'fmax':      ans.fmax,
+        'posx':      ans.posx,
+        'posy':      ans.posy,
+        'fs':        ans.fs,
+        'lwin':      ans.lwin,
+        'toff':      ans.toff,
+        'ccerr':     ans.ccerr,
     }
 
     atributos_resultados = [
         'time_s', 'maac', 'beam_max', 'beam', 
-        'baz', 'slow', 'slowmap', 'baz_width',
-        'fpeak', 'slow_width', 'sx', 'sy'
+        'baz', 'slow', 's_ratio', 'baz_width',
+        'fpeak', 'slow_width', 'sx', 'sy', 'smap'
     ]
 
     for attr in atributos_resultados:
@@ -48,10 +50,9 @@ def load_zlcc(filepath):
     with np.load(filepath, allow_pickle=True) as loader:
         data = {k: loader[k] for k in loader.files}
 
-    st_str = str(data['starttime'])
-    data['starttime'] = dt.datetime.fromisoformat(st_str)
+    data['starttime'] = dt.datetime.fromisoformat(str(data['starttime']))
 
-    for key in ['fs', 'lwin', 'slowmax', 'slowint', 'toff', 'ccerr']:
+    for key in ['code', 'fmin', 'fmax','fs', 'lwin', 'slowmax', 'slowint', 'toff', 'ccerr']:
         if key in data and isinstance(data[key], np.ndarray):
             data[key] = data[key].item()
 

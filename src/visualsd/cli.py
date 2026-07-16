@@ -21,26 +21,14 @@ def zlcc_viewer():
 
     args = parser.parse_args()
 
-    try:
-        print(f" Cargando datos de: {args.input}...")
-        ans = ZLCCResult.from_file(args.input)
-        
-        raw_data = getattr(ans, 'data', None)
-        
-        if raw_data is None:
-            print(" Error: El archivo no contiene la matriz de señales 'data'.")
-            sys.exit(1)
-            
-    except Exception as e:
-        print(f" Error al abrir el archivo: {e}")
-        sys.exit(1)
+    print(f" Leyendo {args.input}...")
+    ans = ZLCCResult.from_file(args.input)
 
     app = QtWidgets.QApplication(sys.argv)
 
     outpath = args.outdir if args.outdir else os.path.dirname(os.path.abspath(args.input))
     
-    print(raw_data.shape)
-    viewer = ZLCCViewer(ans, raw_data, args.pad_sec, outpath)
+    viewer = ZLCCViewer(ans, args.pad_sec, outpath)
     
     viewer.show()
     sys.exit(app.exec_())

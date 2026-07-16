@@ -4,10 +4,10 @@
 import os
 import sys
 import numpy as np
-import pyqtgraph as pg
 import pandas as pd
 import datetime as dt
 from PyQt5 import QtWidgets, QtCore
+import pyqtgraph as pg
 from .utils import NavigatePG
 
 pg.setConfigOption('background', '#121212') 
@@ -50,10 +50,9 @@ class NavigateZLCC(NavigatePG):
 
 
 class ZLCCViewer(QtWidgets.QMainWindow):
-    def __init__(self, zlcc_result, data, pad_sec, outpath):
+    def __init__(self, zlcc_result, pad_sec, outpath="./"):
         super().__init__()
         self.ans     = zlcc_result
-        self.data    = data
         self.pad_sec = pad_sec
         self.outpath = outpath
         
@@ -74,7 +73,7 @@ class ZLCCViewer(QtWidgets.QMainWindow):
         self.p_mb = self.win.addPlot(row=0, col=0, colspan=2)
         self.p_mb.setMouseEnabled(x=True, y=False)
         self.p_mb.setLabel('left', "MAAC", color='#00E5FF')
-        self.p_mb.setLabel('right', "Beam Power [dB]", color='#FFD740')
+        self.p_mb.setLabel('right', "Beam Power", color='#FFD740')
 
         # eje izq.
         self.scatter_maac = pg.ScatterPlotItem(x=self.ans.time_s, y=self.ans.maac, 
@@ -144,7 +143,7 @@ class ZLCCViewer(QtWidgets.QMainWindow):
         self.p_traces.setLimits(xMin=t_pad_min, xMax=t_pad_max)
         self.p_traces.setXRange(t_pad_min, t_pad_max, padding=0)
 
-        num_traces = self.data.shape[1] 
+        num_traces = self.ans.data.shape[1] 
         self.trace_curves = []
         for _ in range(num_traces):
             c = self.p_traces.plot(pen=pg.mkPen(color='#00FFFF', width=1.5))
@@ -287,8 +286,8 @@ class ZLCCViewer(QtWidgets.QMainWindow):
         # ===================
         # ACTUALIZAR SLOWMAP
         # ===================
-        if hasattr(self.ans, 'slowmap'):
-            slomap = self.ans.slowmap[index]
+        if hasattr(self.ans, 'smap'):
+            slomap = self.ans.smap[index]
             slowxy = self.ans.s_vals
             
             slomap_xy = slomap
@@ -315,7 +314,7 @@ class ZLCCViewer(QtWidgets.QMainWindow):
         # ACTUALIZAR TRAZAS
         # ===================
         try:
-            aligned, _, _ = self.ans.stack_traces(self.data, index, pad_sec=self.pad_sec)
+            aligned, _, _ = self.ans.stack_traces(index, pad_sec=self.pad_sec)
             
             n_samples = aligned.shape[0]
             num_traces = aligned.shape[1]

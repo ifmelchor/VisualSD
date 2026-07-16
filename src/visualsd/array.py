@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # coding=utf-8
 
+import os
+import copy
 import numpy as np
 
 def array_transfunc(posx, posy, slomax, sloinc, fmin, fmax, finc):
@@ -115,81 +117,99 @@ def stack_traces(data, delay, fs, ref_index=0, normalize_product=True):
     return aligned_data, beam_stacked, beam_product
 
 
-def parse_julia_dict(julia_dict):
+def parse_zlcc_output(jl, julia_output):
     """
-    Convierte un diccionario proveniente de Julia a estructuras nativas de Python y NumPy.
-    
-    Reglas de conversión:
-    - Vectores y Matrices numéricas -> numpy.ndarray
-    - Union{Nothing, Matrix} -> Lista de Python con (numpy.ndarray o None)
-    - NaN de Julia -> numpy.nan
-    - Cadenas y escalares -> str, float, int nativos
+    Convierte ZLCCOutput (struct Julia) a diccionario Python/NumPy.
+      - Vectores / Matrices numéricas  → np.ndarray
+      - Vector{Union{Matrix,Nothing}}  → lista de ndarray | None
+      - NaN Julia                      → np.nan
     """
-    python_dict = {}
-    
-    try:
-        items = julia_dict.items()
-    
-    except AttributeError:
-        items = dict(julia_dict).items()
 
-    for key, value in items:
-        k_str = str(key) 
+    def _is_nothing(value) -> bool:
+        return value is None or type(value).__name__ in ('NothingValue', 'Nothing')
 
-        if isinstance(value, dict) or type(value).__name__ in ['Dict', 'PyDict', 'juliacall.DictValue']:
-            python_dict[k_str] = parse_julia_dict(value)
-            continue
+    def _fix_shape(arr: np.ndarray) -> np.ndarray:
+        """Corrige dimensiones espurias que introduce juliacall."""
+        if arr.ndim == 3 and arr.shape[-1] == 1:  # (N, 3, 1) → (N, 3)
+            arr = arr[:, :, 0]
+        if arr.ndim == 2 and min(arr.shape) == 1:  # (N, 1) o (1, N) → (N,)
+            arr = arr.ravel()
+        return arr
 
+
+    def _convert_field(value, fname: str):
+        if _is_nothing(value):
+            return None
+
+        # smap: Vector{Union{Matrix{T}, Nothing}} → numpy array 3D
+
+        if fname == 'smap':
+            elements = [
+                None if _is_nothing(elem)
+                else _fix_shape(np.asarray(elem, dtype=float))
+                for elem in value
+            ]
+            first = next((e for e in elements if e is not None), None)
+            
+            if first is None:
+                return np.empty((len(elements), 0, 0), dtype=float)
+            
+            n = first.shape[0]
+            arr3d = np.full((len(elements), n, n), np.nan, dtype=float)
+            for i, e in enumerate(elements):
+                if e is not None:
+                    arr3d[i] = e
+            
+            return arr3d
+
+        # Arrays numéricos (vectores y matrices)
         if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)):
             try:
-                # 1. Lo pasamos a array genérico primero
-                arr = np.array(value)
-                
-                # 2. ¡EL TRUCO PARA EL SLOWMAP!
-                # Si NumPy lo dejó como un array de objetos (ej. (39,) con matrices adentro),
-                # forzamos la extracción y lo apilamos en un cubo 3D (39, 201, 201)
-                if arr.dtype == object:
-                    arr = np.stack([np.asarray(v, dtype=float) for v in arr])
-                else:
-                    arr = np.asarray(arr, dtype=float)
-                
-                # 3. Quitar dimensión fantasma si viene como (N, 3, 1) -> (N, 3)
-                if arr.ndim == 3 and arr.shape[-1] == 1:
-                    arr = arr[:, :, 0] 
-                
-                # 4. Aplanar estrictamente a 1D si es vector (N, 1) o (1, N) -> (N,)
-                if arr.ndim == 2 and (arr.shape[1] == 1 or arr.shape[0] == 1):
-                    arr = arr.ravel()
-                        
-                python_dict[k_str] = arr
-                
+                return _fix_shape(np.asarray(value, dtype=float))
             except Exception:
-                # Si algo de lo anterior falla (ej. si es una lista de strings o tipos raros)
-                python_dict[k_str] = value
-            continue
-            
-        python_dict[k_str] = value
-            
-    return python_dict
+                return value
+
+        # Escalares y strings
+        return value
+
+
+    field_names = [str(f) for f in jl.fieldnames(jl.typeof(julia_output))]
+    return {
+        fname: _convert_field(getattr(julia_output, fname), fname)
+        for fname in field_names
+    }
 
 
 class ZLCCResult:
     """
     Clase para almacenar, analizar y graficar los resultados de ZLCC.
     """
-    def __init__(self, starttime, posx, posy, fs, lwin, slowmax, slowint, toff, ccerr, result_dict):
+    def __init__(self, code, starttime, fmin, fmax, posx, posy, fs, lwin, slowmax, slowint, toff, ccerr, result_dict, data):
+        self.id     = code
         self.starttime = starttime
         self.fs     = fs
         self.lwin   = lwin
         self.toff   = toff
+        self.fmin   = fmin
+        self.fmax   = fmax
         self.posx   = posx
         self.posy   = posy
         self.ccerr  = ccerr
-        self.s_vals = np.arange(-slowmax, slowmax + slowint * 0.5, slowint)
-        self.n_max  = len(result_dict["maac"])
+        self.slowmax = slowmax
+        self.slowint = slowint
+        self.n_max   = len(result_dict["maac"])
+        self.data    = data
 
         if self.n_max > 0:
             self.__dict__.update(result_dict)
+
+        # Variables para Lazy Loading de Julia
+        self._jl_loaded = False
+        self._jl = None
+
+    @property
+    def s_vals(self):
+        return np.arange(-self.slowmax, self.slowmax + self.slowint * 0.5, self.slowint)
 
     def __str__(self):
         st_str = self.starttime.strftime("%Y-%m-%d %H:%M:%S") if hasattr(self, 'starttime') else "N/A"
@@ -218,23 +238,88 @@ class ZLCCResult:
         """Constructor alternativo: Crea una instancia a partir de un archivo."""
         from .io import load_zlcc
 
-        data = load_zlcc(filepath)
+        datafile = load_zlcc(filepath)
 
         try:
-            starttime = data.pop('starttime')
-            posx = data.pop('posx')
-            posy = data.pop('posy')
-            fs = float(data.pop('fs'))
-            lwin = int(data.pop('lwin'))
-            slowmax = float(data.pop('slowmax'))
-            slowint = float(data.pop('slowint'))
-            toff = float(data.pop('toff'))
-            ccerr = float(data.pop('ccerr'))
+            starttime = datafile.pop('starttime')
+            code      = datafile.pop('code')
+            raw_data  = datafile.pop('data')
+            posx      = datafile.pop('posx')
+            posy      = datafile.pop('posy')
+            fs        = float(datafile.pop('fs'))
+            fmin      = float(datafile.pop('fmin'))
+            fmax      = float(datafile.pop('fmax'))
+            lwin      = int(datafile.pop('lwin'))
+            slowmax   = float(datafile.pop('slowmax'))
+            slowint   = float(datafile.pop('slowint'))
+            toff      = float(datafile.pop('toff'))
+            ccerr     = float(datafile.pop('ccerr'))
 
         except KeyError as e:
             raise KeyError(f"El archivo no contiene el metadato necesario: {e}")
 
-        return cls(starttime, posx, posy, fs, lwin, slowmax, slowint, toff, ccerr, data)
+        return cls(code, starttime, fmin, fmax, posx, posy, fs, lwin, slowmax, slowint, toff, ccerr, datafile, raw_data)
+
+    def select(self, **kwargs):
+        """
+        Filtra las ventanas procesadas utilizando criterios dinámicos.
+        Devuelve una nueva instancia de ZLCCResult con los datos filtrados.
+        
+        Sufijos soportados en kwargs:
+        -----------------------------
+        _max   : Filtra valores menores o iguales al umbral (ej. baz_width_max=10.5)
+        _min   : Filtra valores mayores o iguales al umbral (ej. baz_min=0.5)
+        _range : Filtra valores dentro de un rango tupla (min, max) (ej. slow_range=(0.1, 0.4))
+        """
+
+        if self.n_max == 0:
+            return copy.deepcopy(self)
+
+        # Crear la máscara booleana inicial
+        mask = np.ones(self.n_max, dtype=bool)
+
+        # Procesar los kwargs recibidos
+        for key, value in kwargs.items():
+            if value is None:
+                continue
+
+            # Filtro Máximo (_max)
+            if key.endswith('_max'):
+                attr = key[:-4]
+                if hasattr(self, attr):
+                    mask &= (getattr(self, attr) <= value)
+
+            # Filtro Mínimo (_min)
+            elif key.endswith('_min'):
+                attr = key[:-4]
+                if hasattr(self, attr):
+                    mask &= (getattr(self, attr) >= value)
+
+            # Filtro por Rango (_range)
+            elif key.endswith('_range'):
+                attr = key[:-6]
+                if hasattr(self, attr):
+                    data_attr = getattr(self, attr)
+                    
+                    # Lógica especial si es Backazimuth (baz) y el rango cruza el Norte (ej: [350, 15])
+                    if attr == 'baz' and value[0] > value[1]:
+                        mask &= (data_attr >= value[0]) | (data_attr <= value[1])
+                    else:
+                        mask &= (data_attr >= value[0]) & (data_attr <= value[1])
+
+        # 3. Clonar el objeto actual (copia superficial)
+        new_result = copy.copy(self)
+        
+        # 4. Actualizar el conteo de ventanas que sobrevivieron al filtro
+        new_result.n_max = int(np.sum(mask))
+
+        # 5. Filtrar los arrays que dependen del número de ventanas (eje 0 == n_max original)
+        for attr, val in self.__dict__.items():
+            if isinstance(val, np.ndarray) and val.shape[0] == self.n_max:
+                if attr not in ['posx', 'posy', 's_vals']: 
+                    setattr(new_result, attr, val[mask])
+
+        return new_result
 
     def delay(self, index):
         sx = self.sx[index]
@@ -246,18 +331,16 @@ class ZLCCResult:
         Grafica el slowmap si está disponible en los resultados.
         """
 
-        if hasattr(self, 'slowmap'):
+        if hasattr(self, 'smap') and np.any(np.isfinite(self.smap[index])):
 
-            import matplotlib.pyplot as plt
             from .plotting import slowmap
-
-            power = self.slowmap[index]
+            power = self.smap[index]
             kwargs["ccerr"] = self.ccerr
-            slowmap(power, self.s_vals, self.s_vals, **kwargs)
+            ans = slowmap(power, self.s_vals, self.s_vals, **kwargs)
 
-            plt.show()
+            return ans
 
-    def stack_traces(self, data, index, pad_sec=0, **kwargs):
+    def stack_traces(self, index, pad_sec=0, **kwargs):
 
         n_start0  =  int(round(self.time_s[index] * self.fs))
         n_start0 += int(self.toff * self.fs)
@@ -265,13 +348,72 @@ class ZLCCResult:
 
         n_pad = int(round(pad_sec * self.fs))
         n_start = max(0, n_start0 - n_pad)
-        n_end   = min(data.shape[0], n_end0 + n_pad)
+        n_end   = min(self.data.shape[0], n_end0 + n_pad)
 
-        wdata = data[n_start:n_end, :]
+        wdata = self.data[n_start:n_end, :]
         delay = self.delay(index)
         
         return stack_traces(wdata, delay, self.fs, **kwargs)
 
-    def view(self, data, pad_sec=0.0):
+    def stack_slowmap(self, bazw_th, **kwargs):
+        # genera el mapa de lentitud stacked y calcula su incertidumbre
+
+        if hasattr(self, 'smap'):
+
+            from .plotting import slowmap
+
+            if not self._jl_loaded:
+                from juliacall import Main as jl 
+                jl.seval("using SeisArrays")
+                self._jl = jl
+                self._jl_loaded = True
+
+            baz_mask = self.baz_width <= bazw_th
+            valid_mask = baz_mask & np.isfinite(self.smap[:, 0, 0])
+
+            if not np.any(valid_mask):
+                raise ValueError("La máscara no selecciona ningún elemento válido.")
+
+            power   = np.mean(self.smap[valid_mask], axis=0)
+
+            kwargs["ccerr"] = self.ccerr
+            level = power.max()*self.ccerr
+            sx = self._jl.Array(self.s_vals)
+            result = self._jl.uncertainty_contour(sx, sx, self._jl.Array(power), level)
+
+            if result is None:
+                contans = None
+
+            else:
+                contans = {
+                    "ratio":      float(result.ratio),
+                    "slow":       float(result.slow),
+                    "slowmin":    float(result.slowmin),
+                    "slowmax":    float(result.slowmax),
+                    "slow_width": float(result.sloww),
+                    "baz":        float(result.baz),
+                    "bazmin":     float(result.bazmin),
+                    "bazmax":     float(result.bazmax),
+                    "baz_width":  float(result.bazw),
+                }
+
+            ans = slowmap(power, self.s_vals, self.s_vals, **kwargs)
+
+            return ans, contans
+
+    def view(self,  pad_sec=0):
         from .gui.zlcc import init_ZLCCViewer
-        self._zlcc_viewer = init_ZLCCViewer(self, data, pad_sec)
+        self._zlcc_viewer = init_ZLCCViewer(self, pad_sec)
+
+    def write(self, filename=None, outpath="./"):
+        from visualsd.io import save_zlcc
+
+        if not filename:
+            time_str = self.starttime.strftime("%Y%m%d_%H%M")
+            filename = f"{self.id}.{time_str}.{self.fmin:g}-{self.fmax:g}.zlcc.{self.lwin/self.fs:g}.npz"
+
+        filepath = os.path.join(outpath, filename)
+        save_zlcc(filepath, self)
+
+        print(f" >>> file {filepath} created!")
+

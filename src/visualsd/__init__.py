@@ -4,3 +4,4 @@
 __version__ = "0.1.0"
 
 from .inventory import Network, Array
+from .array import ZLCCResult

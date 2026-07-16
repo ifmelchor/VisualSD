@@ -69,7 +69,8 @@ def plot_utm(labels, x_coords, y_coords, padding=1.1, dem=None, levels=50):
     ax.grid(True, linestyle=':', alpha=0.6)
     
     plt.tight_layout()
-    plt.show()
+
+    return fig, ax
 
 def plotgram(y, array, x, axis=None, v_min=None, v_max=None, cmap='Spectral_r', interpolation='spline36', aspect='auto', axis_bar=None, orientation='vertical'):
     
@@ -166,7 +167,7 @@ def slowmap(slomap, slowx, slowy, axis=None, axis_bar=None, v_min=0, v_max=1, cc
     extent = [slowx.min(), slowx.max(), slowy.min(), slowy.max()]
     slomap = slomap.T
 
-    im = axis.imshow(slomap, cmap=cmap, interpolation=interpolation, extent=extent, aspect=aspect, vmin=v_min, vmax=v_max, origin='lower', zorder=1)
+    im = axis.imshow(slomap, cmap=cmap, interpolation=interpolation, extent=extent, aspect=aspect, vmin=v_min, vmax=v_max, origin='lower', rasterized=True, zorder=1)
     
     # Dibujar contornos
     maacth = slomap.max() * ccerr
@@ -182,10 +183,10 @@ def slowmap(slomap, slowx, slowy, axis=None, axis_bar=None, v_min=0, v_max=1, cc
     axis.scatter(0, 0, marker="o", color="k", ec="k", zorder=3)
 
     sloint = np.abs(slowx[1] - slowx[0])
-    axis.xaxis.set_minor_locator(mtick.MultipleLocator(sloint))
-    axis.yaxis.set_minor_locator(mtick.MultipleLocator(sloint))
-    axis.xaxis.set_major_locator(mtick.MultipleLocator(0.5))
-    axis.yaxis.set_major_locator(mtick.MultipleLocator(0.5))
+    axis.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    axis.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    axis.xaxis.set_major_locator(mtick.MaxNLocator(nbins=5))
+    axis.yaxis.set_major_locator(mtick.MaxNLocator(nbins=5))
 
     axis.grid(which="major", ls="-", lw=0.8, color="k", alpha=0.3, zorder=3)
     axis.grid(which="minor", ls=":", lw=0.5, color="k", alpha=0.3, zorder=3)
@@ -195,9 +196,9 @@ def slowmap(slomap, slowx, slowy, axis=None, axis_bar=None, v_min=0, v_max=1, cc
         cbar.locator = mtick.MaxNLocator(nbins=4)
         cbar.update_ticks()
 
-        return (im, cbar), axes
+        return fig, (im, cbar), axes
 
-    return im, axes
+    return fig, im, axes
 
 
 def plot_trace(trace, psd_data=None, spec_data=None, time_mode='datetime', ax_trac=None, ax_psd=None, ax_spec=None, ax_cbar=None, **pg_kwargs):
