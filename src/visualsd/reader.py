@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import os
+import numpy as np
 import datetime as dt
 from pathlib import Path
 from obspy import read, UTCDateTime, Stream
@@ -71,44 +72,36 @@ def scan_available_dates(station):
 
 
 def get_station_stream(station, channel, starttime, endtime):
+    """
+    Devuelve un Stream con UN segmento continuo por traza (una sola traza si no hay huecos, varias si los hay), o None si no hay archivos o datos.
+    """
 
-    # Asegurar que las fechas sean UTCDateTime para ObsPy
-    if not isinstance(starttime, UTCDateTime): 
-        starttime = UTCDateTime(starttime)
+    t0, t1 = UTCDateTime(starttime), UTCDateTime(endtime)
+    tag    = f"{station.id}.{channel}"
 
-    if not isinstance(endtime, UTCDateTime): 
-        endtime = UTCDateTime(endtime)
+    day0, day1 = t0.datetime.date(), t1.datetime.date()
+    files = [sds_filepath(station, channel, day0 + dt.timedelta(days=i)) for i in range((day1 - day0).days + 1)]
+    files = [f for f in files if os.path.isfile(f)]
 
-    # Calcular numero de dias
-    day_diff = (endtime.datetime.date() - starttime.datetime.date()).days 
-    date_list = [starttime.datetime + dt.timedelta(days=i) for i in
-    range(day_diff + 1)]
-    
-    # Buscar los archivos
-    files_to_read = []
-    for date in date_list:
-        file_path = sds_filepath(station, channel, date)
-        if os.path.isfile(file_path):
-            files_to_read.append(file_path)
-            
-    if not files_to_read:
-        print(f" >> No data found for {station.code} between {starttime} and {endtime}")
+    if not files:
+        print(f" >> [{tag}] sin archivos entre {t0} y {t1}")
         return None
 
-    # Leer y unir
     st = Stream()
-    try:
-        for f in files_to_read:
-            st += read(f, starttime=starttime, endtime=endtime)
-            
-        if not st:
+    for f in files:
+        try:
+            st += read(f, starttime=t0, endtime=t1)
+        except Exception as e:
+            print(f" >> [{tag}] error leyendo {f}: {e}")
             return None
-            
-        # Limpiar huecos pequeños y solapamientos
-        st.merge(method=1, fill_value='None') 
-        
-        return st
-    
-    except Exception as e:
-        print(f" >> Error reading data: {e}")
+
+    st = st.select(channel=channel)
+
+    if not st:
+        print(f" >> [{tag}] sin datos entre {t0} y {t1}")
         return None
+
+    st.merge(method=1, fill_value=None)
+    st = st.split()
+    st.sort(keys=["starttime"])
+    return st

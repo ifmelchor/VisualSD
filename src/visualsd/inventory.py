@@ -2,7 +2,9 @@
 
 import os
 import json
+import copy 
 import numpy as np
+from functools import cached_property
 from pathlib import Path
 from obspy import Stream, UTCDateTime
 import datetime as dt
@@ -20,6 +22,7 @@ def load_network(net_code):
         if not manual_path:
             print(" [X] Error: No path provided. Aborting.")
             return None
+        net_path = manual_path
 
     base_dir = Path(net_path)
     net_dir = base_dir / net_code
@@ -49,35 +52,45 @@ def load_network(net_code):
 
 def stream2array(stream, id_list):
     """
-    Convierte un Stream de ObsPy en una matriz NumPy 2D alineada.
-    
-    :param stream: Objeto Stream de ObsPy.
-    :param id_list: Lista de strings con los id esperados (net.sta.loc.chan).
-    :return: (matriz_numpy, lista_canales_faltantes)
+    Stream de ObsPy -> matriz (npts, ncanales) alineada en el tramo común a todas las trazas.
+      id_list: ids esperados (sta.loc.chan o sta.chan), en el orden de las columnas
+    Devuelve (ids, data, t0, fs); ([], None, None, None) si no hay ninguna traza.
     """
-    
-    # Si el stream está vacío, devolvemos None
-    if not stream:
-        return [], None
-
-    max_npts = max([len(tr.data) for tr in stream])
-    ncha     = len(id_list)
-    array = np.full((max_npts, ncha), np.nan)
-    
-    valid_codes = []
-    for i, code in enumerate(id_list):
-        sta, loc, cha = code.split(".")
-        tr = stream.select(station=sta, location=loc, channel=cha)
-
+    trs, ids = [], []
+    for code in id_list:
+        parts = code.split(".")
+        sta, cha = parts[0], parts[-1]
+        loc = parts[1] if len(parts) == 3 else ""
+        tr = stream.select(station=sta, location=loc, channel=cha) if stream else None
         if not tr:
             print(f" [Warn] :: {code} no se encontró en el Stream")
             continue
-        else:
-            valid_codes.append(code)
-            npts = tr[0].stats.npts
-            array[:npts, i] = tr[0].data
+        ids.append(code)
+        trs.append(tr[0])
 
-    return valid_codes, array
+    if not trs:
+        return [], None, None, None
+
+    rates = {t.stats.sampling_rate for t in trs}
+    if len(rates) > 1:
+        raise ValueError(f"frecuencias de muestreo distintas entre canales: {sorted(rates)}")
+    fs = rates.pop()
+
+    # tramo común
+    t0 = max(t.stats.starttime for t in trs)
+    t1 = min(t.stats.endtime for t in trs)
+    if t1 <= t0:
+        print(f" [Warn] :: los canales no se solapan en el tiempo")
+        return [], None, None, None
+
+    n = int(round((t1 - t0) * fs)) + 1
+    cols = []
+    for t in trs:
+        i0 = int(round((t0 - t.stats.starttime) * fs))
+        cols.append(np.asarray(t.data[i0:i0 + n], dtype=float))
+    n = min(len(c) for c in cols)
+
+    return ids, np.column_stack([c[:n] for c in cols]), t0, fs
 
 
 class Network:
@@ -152,7 +165,7 @@ class Network:
                     continue
             
                 if sta.is_channel(ch_code):
-                    print(f" [!] Warning: Channel {channel} already exist in {sta_id}")
+                    print(f" [!] Warning: Channel {ch_code} already exist in {sta_id}")
                     continue
 
                 sample_rate = ch_info.get("sampling_rate")
@@ -214,7 +227,6 @@ class Network:
         else:
             return code, lat, lon
 
-
     def get_aperture(self):
 
         labels, x_coords, y_coords = self.get_position(utm=True, plot=False)
@@ -241,7 +253,7 @@ class Network:
                 sla = labels[i]
                 slb = labels[j]
 
-                print(f" {sla} -- {slb}: {dist:.2f} m")
+                print(f" {sla} -- {slb}: {dist:.2f} km")
 
                 if dist > max_dist:
                     max_dist = dist
@@ -259,25 +271,28 @@ class Network:
         else:
             if isinstance(stations, str):
                 stations = [stations]
-            
+            unknown = [k for k in stations if k not in self._stations]
+            if unknown:
+                raise ValueError(f"[{self.code}] estaciones desconocidas: {unknown} (disponibles: {list(self._stations)})")
             stations_to_query = [self._stations[k] for k in stations if k in self._stations]
 
         net_stream = Stream()
         valid_id = []
-
-        sta_kwargs = kwargs.copy()
-        sta_kwargs["toff"] = toff
+        sta_kwargs = dict(kwargs, toff=toff)
         for sta in stations_to_query:
-            st = sta.get_stream(starttime, endtime, **sta_kwargs)
+            chans = [ch for ch in sta.channels if component is None or ch[-1] == component]
+            if not chans:
+                continue
+
+            st = sta.get_stream(starttime, endtime,  channel=chans, **sta_kwargs)
+
             if st:
                 for tr in st:
-                    if tr.stats.channel[-1] == component:
                         net_stream.append(tr)
-                        valid_id.append(sta.id + "." + tr.stats.channel)
+                        valid_id.append(f"{sta.id}.{tr.stats.channel}")
 
         if return_array:
-            valid_id, array = stream2array(net_stream, valid_id)
-            return valid_id, array
+            return stream2array(net_stream, valid_id)
 
         return net_stream
 
@@ -342,96 +357,63 @@ class Station:
         
         return self._start_date, self._end_date
 
-    def get_stream(self, starttime, endtime, channel=None, pad=10, return_array=False, **kwargs):
+    def get_stream(self, starttime, endtime, channel=None, pad=600, return_array=False, **kwargs):
 
         from .reader import get_station_stream
         from .signal import stream_preprocess
 
-        # 1. IDENTIFICA CANALES
-        if isinstance(channel, list):
-            ch_names = channel
-        elif channel:
-            ch_names = [channel]
-        else:
-            ch_names = list(self.channels.keys())
+        config = kwargs.copy()
+        empty  = ([], None, None, None) if return_array else None
 
-        valid_channels = []
-        for ch in ch_names:
-            if self.is_channel(ch):
-                valid_channels.append(ch)
-            else:
+        # Canales
+        names = list(self.channels) if channel is None else (channel if isinstance(channel, list) else [channel])
+        valid = [ch for ch in names if self.is_channel(ch)]
+        for ch in names:
+            if ch not in valid:
                 print(f" >>> Channel '{ch}' not found in {self.id}")
+        if not valid:
+            return empty
 
-        if not valid_channels:
-            return None
+        # Padding
+        toff = float(config.pop("toff", 0))
+        if toff >= pad:
+            raise ValueError(f"toff={toff} s debe ser menor que el pad ({pad} s)")
+        config["taper_max_length"] = pad - toff
 
-        ncha = len(valid_channels)
-
-        pad = dt.timedelta(minutes=pad)
-        t_start_pad = starttime - pad
-        t_end_pad   = endtime + pad
-
-        # Lectura de datos crudos
+        # Lectura miniseeds
+        t0, t1 = UTCDateTime(starttime), UTCDateTime(endtime)
+        r0, r1 = t0 - pad, t1 + pad
+        config["starttime"], config["endtime"] = r0, r1
         st_raw = Stream()
-        for ch in valid_channels:
-            st_ch = get_station_stream(self, ch, t_start_pad, t_end_pad)
+        for ch in valid:
+            st_ch = get_station_stream(self, ch, r0, r1)
             if st_ch:
                 st_raw += st_ch
-
         if not st_raw:
-            print(f" [{self.code}] No data to read.")
-            return None
+            return empty
 
-        # Verificar tasa de muestreo
-        sample_rates = list(set([tr.stats.sampling_rate for tr in st_raw]))
-        if len(sample_rates) > 1:
-            
-            print(f" Imposible realizar un preprocesado automatico con multiples frecuencias de muestreo.")
-            
-            for tr in st_raw:
-                print(tr.stats.id, tr.stats.sampling_rate)
+        # check tasa de muestreo
+        rates = {tr.stats.sampling_rate for tr in st_raw}
+        if len(rates) > 1:
+            raise ValueError(f"[{self.id}] frecuencias de muestreo distintas: {sorted(rates)}")
+        
+        # preprocesado + política de huecos
+        rm_resp = config.get("rm_resp", False)
+        rm_sens = config.get("rm_sens", True) and not rm_resp
+        config["rm_resp"], config["rm_sens"] = rm_resp, rm_sens
+        if rm_resp or rm_sens:
+            chans = {tr.stats.channel for tr in st_raw}
+            config["rm_dict"] = {ch: (self.channels[ch].get_resp() if rm_resp else self.channels[ch].sensitivity) for ch in chans}
+        config.setdefault("gaps", "reject")
+        st = stream_preprocess(st_raw, config)
+        if not st:
+            return empty
 
-            st_final = st_raw.slice(UTCDateTime(starttime), UTCDateTime(endtime))
-
-            return st_final
-
-        fs = sample_rates[0]
-
-        # prepara el archivo de configuracion
-        config_kwargs = kwargs.copy()
-        rm_sens = config_kwargs.get('rm_sens', True)
-        rm_resp = config_kwargs.get('rm_resp', False)
-
-        if rm_sens or rm_resp:
-            sens_dict = {}
-            for ch in self:
-                if ch.channel in valid_channels:
-                    if rm_resp:
-                        sens_dict[ch.channel] = ch.get_resp()
-                    else:
-                        sens_dict[ch.channel] = ch.sensitivity
-
-            if not sens_dict:
-                config_kwargs['rm_sens'] = False
-                config_kwargs['rm_resp'] = False
-            else:
-                config_kwargs['rm_dict'] = sens_dict
-
-        st_processed = stream_preprocess(st_raw, config=config_kwargs)
-
-        # Cortar el pad
-        toff = config_kwargs.get('toff', 0) # in seconds
-        toff = dt.timedelta(seconds=toff)
-        st_final = st_processed.slice(UTCDateTime(starttime-toff), UTCDateTime(endtime+toff))
-
+        # recorte
+        st = st.slice(t0 - toff, t1 + toff)
         if return_array:
-            for i in range(len(valid_channels)):
-                valid_channels[i] += self.id + "."
-            
-            valid, array = stream2array(st_final, valid_channels)
-            return valid, array
-        else:
-            return st_final
+            return stream2array(st, [f"{self.id}.{tr.stats.channel}" for tr in st])
+        return st
 
     def get_utm(self):
         if not self._utm:
@@ -483,10 +465,6 @@ class Array(Network):
         self.component = component
         self._reindex_by_loc()
 
-        # Variables para Lazy Loading de Julia
-        self._jl_loaded = False
-        self._jl = None
-
     def _reindex_by_loc(self):
         new_stations = {}
         for sta in self._stations.values():
@@ -494,13 +472,82 @@ class Array(Network):
             new_stations[loc_key] = sta
         self._stations = new_stations
 
+    @property
+    def nsta(self):
+        return len(self._stations)
+
     def __repr__(self):
         return f"<Array {self.code} ({len(self._stations)} stations)>"
 
-    def get_stream(self, starttime, endtime, toff, stations=None, component=None, return_array=False, **kwargs):
-        if component is None:
-            component = self.component
-        return super().get_stream(starttime, endtime, toff, stations=stations, component=self.component, return_array=return_array, **kwargs)
+    @cached_property
+    def _positions(self):
+        ids, x, y = self.get_position(utm=True)
+        ids = list(ids)
+        x = (np.asarray(x, dtype=float) - np.mean(x)) / 1000.0
+        y = (np.asarray(y, dtype=float) - np.mean(y)) / 1000.0
+        return ids, x, y
+
+    def positions_km(self):
+        """(ids, x, y) en km, centradas en el array."""
+        ids, x, y = self._positions
+        return list(ids), x.copy(), y.copy()
+
+    @cached_property
+    def distances(self):
+        """Distancias entre pares (km), triángulo superior, en el orden de positions_km."""
+        _, x, y = self._positions
+        d = np.hypot(np.subtract.outer(x, x), np.subtract.outer(y, y))
+        return d[np.triu_indices(len(x), 1)]
+
+    @property
+    def aperture(self):
+        """Distancia máxima entre estaciones (km)."""
+        return float(self.distances.max())
+
+    @property
+    def dmin(self):
+        """Distancia mínima entre estaciones (km)."""
+        return float(self.distances.min())
+
+    def subarray(self, station_list):
+        """
+        Nuevo Array con solo esas estaciones. Acepta las claves del array (location) o los sta.id. Comparte los objetos Station.
+        """
+
+        station_list = list(station_list)
+
+        if len(set(station_list)) != len(station_list):
+            raise ValueError(f"estaciones repetidas en {station_list}")
+
+        # traducir cada entrada a su clave (location)
+        by_id = {sta.id: k for k, sta in self._stations.items()}
+        wanted, unknown = set(), []
+        for s in station_list:
+            if s in self._stations:
+                wanted.add(s)
+            elif s in by_id:
+                wanted.add(by_id[s])
+            else:
+                unknown.append(s)
+        if unknown:
+            raise ValueError(f"[{self.code}] estaciones desconocidas {unknown}; disponibles: {list(self._stations)}")
+        if len(wanted) != len(station_list):          # p.ej. "01" y "PJ01.00": la misma estación dos veces
+            raise ValueError(f"la misma estación aparece dos veces en {station_list}")
+
+        # orden del array, no el del usuario
+        keys = [k for k in self._stations if k in wanted]
+
+        sub = copy.copy(self)
+        sub._stations = {k: self._stations[k] for k in keys}
+
+        # borrar lo cacheado se recalcula para el subarray
+        for name in list(vars(sub)):
+            if isinstance(getattr(type(sub), name, None), cached_property):
+                del sub.__dict__[name]
+        return sub
+
+    def get_stream(self, starttime, endtime, toff, return_array=False, **kwargs):
+        return super().get_stream(starttime, endtime, toff, component=self.component, return_array=return_array, **kwargs)
 
     def delay_matrix(self, sx, sy):
         """
@@ -509,79 +556,35 @@ class Array(Network):
         """
 
         from .array import delay_matrix
-
         _, posx, posy = self.get_position(utm=True)
-
         return delay_matrix(sx, sy, posx/1000, posy/1000, is_samples=False)
 
     def response(self, slomax, fmin, fmax, sloinc=0.01, finc=0.05, plot=True):
-
         from .array import array_transfunc
 
         _, posx, posy = self.get_position(utm=True)
-
         s_vals, power = array_transfunc(posx=posx/1000, posy=posy/1000,
             slomax=slomax, sloinc=sloinc, fmin=fmin, fmax=fmax, finc=finc
         )
-
         if not plot:
             return s_vals, power
-
-        from .plotting import slowmap
-
-        fig, _, axes = slowmap(power, s_vals, s_vals, v_min=0, v_max=power.max())
-        axes[0].set_title(f"freq={fmin}-{fmax} Hz")
-
-        return fig, axes
-
-    def zlcc(self, starttime, data, fs, lwin, nadv, fmin, fmax, slowmax, tof, **zlcc_kwargs):
-
-        from .array import parse_zlcc_output, ZLCCResult
-
-        def set_default(**kwargs):
-            defaults = {
-                "slowint_c" : 0.1,
-                "slowint_f" : 0.01,
-                "ccerr"     : 0.95,
-                "maac_th"   : 0.3,
-                "slowfw"    : 0.5,
-                "return_cmap": True,
-            }
-            defaults.update(kwargs)
-            return defaults
-
-        # Cargar la librería en el entorno de Julia
-        if not self._jl_loaded:
-            from juliacall import Main as jl 
-            jl.seval("using SeisArrays")
-            self._jl = jl
-            self._jl_loaded = True
-
-        # carga las posiciones
-        _, posx, posy = self.get_position(utm=True)
-        x_jl   = self._jl.Array(posx/1000)
-        y_jl   = self._jl.Array(posy/1000)
-
-        # carga el objeto SeisArray2D de julia
-        sa_jl  = self._jl.SeisArray2D(x_jl, y_jl, self._jl.Array(data), fs)
-
-        # define los kwargs
-        zlcc_kwargs = set_default(**zlcc_kwargs)
-        ans_jl = self._jl.zlcc(sa_jl, lwin, float(nadv), float(fmin), float(fmax), float(slowmax), float(tof), zlcc_kwargs.get("slowint_c"), zlcc_kwargs.get("slowint_f"), zlcc_kwargs.get("ccerr"), zlcc_kwargs.get("maac_th"), zlcc_kwargs.get("slowfw"), zlcc_kwargs.get("return_cmap")
-            )
-
-        ans_py  = parse_zlcc_output(self._jl, ans_jl)
-        code    = f"{self.code}.{self.component}"
         
-        zlcc_ob = ZLCCResult(code, starttime, fmin, fmax, posx/1000, posy/1000, fs, lwin, slowmax, zlcc_kwargs.get("slowint_f"), tof, zlcc_kwargs.get("ccerr"), ans_py, data)
-
-        return zlcc_ob
+        else:
+            from .plotting import slowmap
+            fig, _, axes = slowmap(power, s_vals, s_vals, v_min=0, v_max=power.max())
+            axes[0].set_title(f"freq={fmin}-{fmax} Hz")
+            return fig, axes
 
     def get_beam(self, data, sx, sy, fs, **kwargs):
-
         from .array import compute_beams_matrix
 
         delay = self.delay_matrix(sx, sy)
-
         return compute_beams_matrix(data, delay, fs, **kwargs)
 
+    def get_trias(self, station_list=None, *, fs, fmax, fmin=None, nulldir="nulltest", g_min=0.1):
+        from .array import TRIAS
+        return TRIAS(self, fs=fs, fmax=fmax, fmin=fmin, station_list=station_list, nulldir=nulldir, g_min=g_min)
+
+    def get_zlcc(self, station_list=None):
+        from .array import ZLCC
+        return ZLCC(self, station_list=station_list)
